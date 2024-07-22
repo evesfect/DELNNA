@@ -2,10 +2,22 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
 	"sync"
+	"time"
+
+	"github.com/dgrijalva/jwt-go"
+	"github.com/gorilla/mux"
 )
+
+var jwtKey = []byte("your_secret_key")
+
+type Claims struct {
+	NodeID string `json:"node_id"`
+	jwt.StandardClaims
+}
 
 type NodeInfo struct {
 	ID      string `json:"id"`
@@ -25,6 +37,55 @@ func NewRegistry() *Registry {
 	}
 }
 
+func generateToken(nodeID string) (string, error) {
+	expirationTime := time.Now().Add(24 * time.Hour)
+	claims := &Claims{
+		NodeID: nodeID,
+		StandardClaims: jwt.StandardClaims{
+			ExpiresAt: expirationTime.Unix(),
+		},
+	}
+
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+	return token.SignedString(jwtKey)
+}
+
+func validateToken(tokenString string) (*Claims, error) {
+	claims := &Claims{}
+	token, err := jwt.ParseWithClaims(tokenString, claims, func(token *jwt.Token) (interface{}, error) {
+		return jwtKey, nil
+	})
+
+	if err != nil {
+		return nil, err
+	}
+
+	if !token.Valid {
+		return nil, fmt.Errorf("invalid token")
+	}
+
+	return claims, nil
+}
+
+func authMiddleware(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		tokenString := r.Header.Get("Authorization")
+		if tokenString == "" {
+			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			return
+		}
+
+		claims, err := validateToken(tokenString)
+		if err != nil {
+			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			return
+		}
+
+		r.Header.Set("X-Node-ID", claims.NodeID)
+		next.ServeHTTP(w, r)
+	}
+}
+
 func (r *Registry) RegisterNode(w http.ResponseWriter, req *http.Request) {
 	var node NodeInfo
 	if err := json.NewDecoder(req.Body).Decode(&node); err != nil {
@@ -36,8 +97,16 @@ func (r *Registry) RegisterNode(w http.ResponseWriter, req *http.Request) {
 	r.Nodes[node.ID] = node
 	r.mu.Unlock()
 
+	token, err := generateToken(node.ID)
+	if err != nil {
+		http.Error(w, "Failed to generate token", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{"token": token})
+
 	log.Printf("Node registered: %s at %s", node.ID, node.Address)
-	w.WriteHeader(http.StatusOK)
 }
 
 func (r *Registry) GetNodes(w http.ResponseWriter, req *http.Request) {
@@ -71,12 +140,13 @@ func (r *Registry) HandleSetData(w http.ResponseWriter, req *http.Request) {
 
 func main() {
 	registry := NewRegistry()
+	r := mux.NewRouter()
 
-	http.HandleFunc("/register", registry.RegisterNode)
-	http.HandleFunc("/nodes", registry.GetNodes)
-	http.HandleFunc("/getData", registry.HandleGetData)
-	http.HandleFunc("/setData", registry.HandleSetData)
+	r.HandleFunc("/register", registry.RegisterNode).Methods("POST")
+	r.HandleFunc("/nodes", authMiddleware(registry.GetNodes)).Methods("GET")
+	r.HandleFunc("/getData", authMiddleware(registry.HandleGetData)).Methods("GET")
+	r.HandleFunc("/setData", authMiddleware(registry.HandleSetData)).Methods("POST")
 
 	log.Println("Registry starting on :8000")
-	log.Fatal(http.ListenAndServe(":8000", nil))
+	log.Fatal(http.ListenAndServe(":8000", r))
 }
