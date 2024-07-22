@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"sync"
@@ -15,6 +16,7 @@ type Node struct {
 	Address         string
 	Data            map[string]interface{}
 	RegistryAddress string
+	Token           string
 	mu              sync.RWMutex
 }
 
@@ -30,6 +32,31 @@ func NewNode(id, address, registryAddress string) *Node {
 		Data:            make(map[string]interface{}),
 		RegistryAddress: registryAddress,
 	}
+}
+
+func (n *Node) RegisterWithRegistry(registryAddress string) error {
+	data, _ := json.Marshal(map[string]string{"id": n.ID, "address": n.Address})
+	resp, err := http.Post(fmt.Sprintf("http://%s/register", registryAddress), "application/json", bytes.NewBuffer(data))
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	var result map[string]string
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return err
+	}
+	n.Token = result["token"]
+	return nil
+}
+
+func (n *Node) makeAuthenticatedRequest(method, url string, body io.Reader) (*http.Response, error) {
+	req, err := http.NewRequest(method, url, body)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", n.Token)
+	return http.DefaultClient.Do(req)
 }
 
 func (n *Node) HandleGetData(w http.ResponseWriter, r *http.Request) {
@@ -54,14 +81,8 @@ func (n *Node) HandleSetData(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 }
 
-func (n *Node) RegisterWithRegistry(registryAddress string) error {
-	data, _ := json.Marshal(map[string]string{"id": n.ID, "address": n.Address})
-	_, err := http.Post(fmt.Sprintf("http://%s/register", registryAddress), "application/json", bytes.NewBuffer(data))
-	return err
-}
-
 func (n *Node) GetNodesFromRegistry() (map[string]NodeInfo, error) {
-	resp, err := http.Get(fmt.Sprintf("http://%s/nodes", n.RegistryAddress))
+	resp, err := n.makeAuthenticatedRequest("GET", fmt.Sprintf("http://%s/nodes", n.RegistryAddress), nil)
 	if err != nil {
 		return nil, err
 	}
@@ -76,7 +97,7 @@ func (n *Node) GetNodesFromRegistry() (map[string]NodeInfo, error) {
 }
 
 func (n *Node) RequestDataFromNode(nodeAddress string) (map[string]interface{}, error) {
-	resp, err := http.Get(fmt.Sprintf("http://%s/getData", nodeAddress))
+	resp, err := n.makeAuthenticatedRequest("GET", fmt.Sprintf("http://%s/getData", nodeAddress), nil)
 	if err != nil {
 		return nil, err
 	}
@@ -125,12 +146,12 @@ func (n *Node) SetDataOnRegistry(data map[string]interface{}) error {
 		return err
 	}
 
-	_, err = http.Post(fmt.Sprintf("http://%s/setData", n.RegistryAddress), "application/json", bytes.NewBuffer(jsonData))
+	_, err = n.makeAuthenticatedRequest("POST", fmt.Sprintf("http://%s/setData", n.RegistryAddress), bytes.NewBuffer(jsonData))
 	return err
 }
 
 func (n *Node) GetDataFromRegistry() (map[string]interface{}, error) {
-	resp, err := http.Get(fmt.Sprintf("http://%s/getData", n.RegistryAddress))
+	resp, err := n.makeAuthenticatedRequest("GET", fmt.Sprintf("http://%s/getData", n.RegistryAddress), nil)
 	if err != nil {
 		return nil, err
 	}
