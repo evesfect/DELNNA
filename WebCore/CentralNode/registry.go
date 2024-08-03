@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -72,13 +73,19 @@ func validateToken(tokenString string) (*Claims, error) {
 func authMiddleware(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		tokenString := r.Header.Get("Authorization")
+		log.Printf("Received token: %s", tokenString)
+
 		if tokenString == "" {
+			log.Println("No token provided")
 			http.Error(w, "Unauthorized", http.StatusUnauthorized)
 			return
 		}
 
+		tokenString = strings.TrimPrefix(tokenString, "Bearer ")
+
 		claims, err := validateToken(tokenString)
 		if err != nil {
+			log.Printf("Token validation error: %v", err)
 			http.Error(w, "Unauthorized", http.StatusUnauthorized)
 			return
 		}
