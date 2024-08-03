@@ -10,6 +10,7 @@ import (
 
 	"github.com/dgrijalva/jwt-go"
 	"github.com/gorilla/mux"
+	"golang.org/x/crypto/bcrypt"
 )
 
 var jwtKey = []byte("your_secret_key")
@@ -20,8 +21,9 @@ type Claims struct {
 }
 
 type NodeInfo struct {
-	ID      string `json:"id"`
-	Address string `json:"address"`
+	ID       string `json:"id"`
+	Address  string `json:"address"`
+	Password string `json:"password"`
 }
 
 type Registry struct {
@@ -93,7 +95,14 @@ func (r *Registry) RegisterNode(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
+	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(node.Password), bcrypt.DefaultCost)
+	if err != nil {
+		http.Error(w, "Failed to hash password", http.StatusInternalServerError)
+		return
+	}
+
 	r.mu.Lock()
+	node.Password = string(hashedPassword)
 	r.Nodes[node.ID] = node
 	r.mu.Unlock()
 
@@ -107,6 +116,41 @@ func (r *Registry) RegisterNode(w http.ResponseWriter, req *http.Request) {
 	json.NewEncoder(w).Encode(map[string]string{"token": token})
 
 	log.Printf("Node registered: %s at %s", node.ID, node.Address)
+}
+
+func (r *Registry) AuthenticateNode(w http.ResponseWriter, req *http.Request) {
+	var credentials struct {
+		ID       string `json:"id"`
+		Password string `json:"password"`
+	}
+
+	if err := json.NewDecoder(req.Body).Decode(&credentials); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	r.mu.RLock()
+	node, exists := r.Nodes[credentials.ID]
+	r.mu.RUnlock()
+
+	if !exists {
+		http.Error(w, "Node not found", http.StatusUnauthorized)
+		return
+	}
+
+	if err := bcrypt.CompareHashAndPassword([]byte(node.Password), []byte(credentials.Password)); err != nil {
+		http.Error(w, "Invalid password", http.StatusUnauthorized)
+		return
+	}
+
+	token, err := generateToken(node.ID)
+	if err != nil {
+		http.Error(w, "Failed to generate token", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{"token": token})
 }
 
 func (r *Registry) GetNodes(w http.ResponseWriter, req *http.Request) {
@@ -143,6 +187,7 @@ func main() {
 	r := mux.NewRouter()
 
 	r.HandleFunc("/register", registry.RegisterNode).Methods("POST")
+	r.HandleFunc("/authenticate", registry.AuthenticateNode).Methods("POST")
 	r.HandleFunc("/nodes", authMiddleware(registry.GetNodes)).Methods("GET")
 	r.HandleFunc("/getData", authMiddleware(registry.HandleGetData)).Methods("GET")
 	r.HandleFunc("/setData", authMiddleware(registry.HandleSetData)).Methods("POST")

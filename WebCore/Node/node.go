@@ -14,6 +14,7 @@ import (
 type Node struct {
 	ID              string
 	Address         string
+	Password        string
 	Data            map[string]interface{}
 	RegistryAddress string
 	Token           string
@@ -25,18 +26,35 @@ type NodeInfo struct {
 	Address string `json:"address"`
 }
 
-func NewNode(id, address, registryAddress string) *Node {
+func NewNode(id, address, registryAddress string, password string) *Node {
 	return &Node{
 		ID:              id,
 		Address:         address,
+		Password:        password,
 		Data:            make(map[string]interface{}),
 		RegistryAddress: registryAddress,
 	}
 }
 
 func (n *Node) RegisterWithRegistry(registryAddress string) error {
-	data, _ := json.Marshal(map[string]string{"id": n.ID, "address": n.Address})
+	data, _ := json.Marshal(map[string]string{"id": n.ID, "address": n.Address, "password": n.Password})
 	resp, err := http.Post(fmt.Sprintf("http://%s/register", registryAddress), "application/json", bytes.NewBuffer(data))
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	var result map[string]string
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return err
+	}
+	n.Token = result["token"]
+	return nil
+}
+
+func (n *Node) Authenticate() error {
+	data, _ := json.Marshal(map[string]string{"id": n.ID, "password": n.Password})
+	resp, err := http.Post(fmt.Sprintf("http://%s/authenticate", n.RegistryAddress), "application/json", bytes.NewBuffer(data))
 	if err != nil {
 		return err
 	}
@@ -195,14 +213,15 @@ func main() {
 		id              = flag.String("id", "", "Node ID")
 		address         = flag.String("address", "", "Node address (host:port)")
 		registryAddress = flag.String("registry", "", "Registry address (host:port)")
+		password        = flag.String("password", "", "Node password")
 	)
 	flag.Parse()
 
-	if *id == "" || *address == "" || *registryAddress == "" {
-		log.Fatal("Node ID, address, and registry address are required")
+	if *id == "" || *address == "" || *registryAddress == "" || *password == "" {
+		log.Fatal("Node ID, address, registry address and password are required")
 	}
 
-	node := NewNode(*id, *address, *registryAddress)
+	node := NewNode(*id, *address, *registryAddress, *password)
 
 	if err := node.RegisterWithRegistry(*registryAddress); err != nil {
 		log.Fatalf("Failed to register with registry: %v", err)
