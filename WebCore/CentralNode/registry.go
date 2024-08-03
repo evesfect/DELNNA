@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/dgrijalva/jwt-go"
+	"github.com/google/uuid"
 	"github.com/gorilla/mux"
 	"golang.org/x/crypto/bcrypt"
 )
@@ -17,8 +18,15 @@ import (
 var jwtKey = []byte("your_secret_key")
 
 type Claims struct {
-	NodeID string `json:"node_id"`
+	NodeID         string `json:"node_id"`
+	RefreshTokenID string `json:"refresh_token_id"`
 	jwt.StandardClaims
+}
+
+type RefreshToken struct {
+	ID        string
+	NodeID    string
+	ExpiresAt time.Time
 }
 
 type NodeInfo struct {
@@ -28,9 +36,12 @@ type NodeInfo struct {
 }
 
 type Registry struct {
-	Nodes map[string]NodeInfo
-	Data  map[string]interface{}
-	mu    sync.RWMutex
+	Nodes         map[string]NodeInfo
+	Data          map[string]interface{}
+	RefreshTokens map[string]RefreshToken
+
+	mu        sync.RWMutex
+	refreshMu sync.RWMutex
 }
 
 func NewRegistry() *Registry {
@@ -40,17 +51,35 @@ func NewRegistry() *Registry {
 	}
 }
 
-func generateToken(nodeID string) (string, error) {
-	expirationTime := time.Now().Add(24 * time.Hour)
-	claims := &Claims{
-		NodeID: nodeID,
+func (r *Registry) generateTokens(nodeID string) (string, string, error) {
+	// Generate access token
+	accessTokenExpirationTime := time.Now().Add(15 * time.Minute)
+	refreshTokenID := uuid.New().String()
+	accessClaims := &Claims{
+		NodeID:         nodeID,
+		RefreshTokenID: refreshTokenID,
 		StandardClaims: jwt.StandardClaims{
-			ExpiresAt: expirationTime.Unix(),
+			ExpiresAt: accessTokenExpirationTime.Unix(),
 		},
 	}
 
-	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
-	return token.SignedString(jwtKey)
+	accessToken := jwt.NewWithClaims(jwt.SigningMethodHS256, accessClaims)
+	accessTokenString, err := accessToken.SignedString(jwtKey)
+	if err != nil {
+		return "", "", err
+	}
+
+	// Generate refresh token
+	refreshTokenExpirationTime := time.Now().Add(7 * 24 * time.Hour)
+	r.refreshMu.Lock()
+	r.RefreshTokens[refreshTokenID] = RefreshToken{
+		ID:        refreshTokenID,
+		NodeID:    nodeID,
+		ExpiresAt: refreshTokenExpirationTime,
+	}
+	r.refreshMu.Unlock()
+
+	return accessTokenString, refreshTokenID, nil
 }
 
 func validateToken(tokenString string) (*Claims, error) {
@@ -73,7 +102,6 @@ func validateToken(tokenString string) (*Claims, error) {
 func authMiddleware(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		tokenString := r.Header.Get("Authorization")
-		log.Printf("Received token: %s", tokenString)
 
 		if tokenString == "" {
 			log.Println("No token provided")
@@ -81,6 +109,7 @@ func authMiddleware(next http.HandlerFunc) http.HandlerFunc {
 			return
 		}
 
+		// "Bearer" prefix needs to be trimmed
 		tokenString = strings.TrimPrefix(tokenString, "Bearer ")
 
 		claims, err := validateToken(tokenString)
@@ -113,14 +142,17 @@ func (r *Registry) RegisterNode(w http.ResponseWriter, req *http.Request) {
 	r.Nodes[node.ID] = node
 	r.mu.Unlock()
 
-	token, err := generateToken(node.ID)
+	accessToken, refreshToken, err := r.generateTokens(node.ID)
 	if err != nil {
-		http.Error(w, "Failed to generate token", http.StatusInternalServerError)
+		http.Error(w, "Failed to generate tokens", http.StatusInternalServerError)
 		return
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]string{"token": token})
+	json.NewEncoder(w).Encode(map[string]string{
+		"access_token":  accessToken,
+		"refresh_token": refreshToken,
+	})
 
 	log.Printf("Node registered: %s at %s", node.ID, node.Address)
 }
@@ -150,14 +182,52 @@ func (r *Registry) AuthenticateNode(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	token, err := generateToken(node.ID)
+	accessToken, refreshToken, err := r.generateTokens(credentials.ID)
 	if err != nil {
-		http.Error(w, "Failed to generate token", http.StatusInternalServerError)
+		http.Error(w, "Failed to generate tokens", http.StatusInternalServerError)
 		return
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]string{"token": token})
+	json.NewEncoder(w).Encode(map[string]string{
+		"access_token":  accessToken,
+		"refresh_token": refreshToken,
+	})
+}
+
+func (r *Registry) RefreshToken(w http.ResponseWriter, req *http.Request) {
+	var refreshReq struct {
+		RefreshToken string `json:"refresh_token"`
+	}
+	if err := json.NewDecoder(req.Body).Decode(&refreshReq); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	r.refreshMu.RLock()
+	refreshToken, exists := r.RefreshTokens[refreshReq.RefreshToken]
+	r.refreshMu.RUnlock()
+
+	if !exists || time.Now().After(refreshToken.ExpiresAt) {
+		http.Error(w, "Invalid or expired refresh token", http.StatusUnauthorized)
+		return
+	}
+
+	accessToken, newRefreshToken, err := r.generateTokens(refreshToken.NodeID)
+	if err != nil {
+		http.Error(w, "Failed to generate new tokens", http.StatusInternalServerError)
+		return
+	}
+
+	r.refreshMu.Lock()
+	delete(r.RefreshTokens, refreshReq.RefreshToken)
+	r.refreshMu.Unlock()
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{
+		"access_token":  accessToken,
+		"refresh_token": newRefreshToken,
+	})
 }
 
 func (r *Registry) GetNodes(w http.ResponseWriter, req *http.Request) {
@@ -198,6 +268,8 @@ func main() {
 	r.HandleFunc("/nodes", authMiddleware(registry.GetNodes)).Methods("GET")
 	r.HandleFunc("/getData", authMiddleware(registry.HandleGetData)).Methods("GET")
 	r.HandleFunc("/setData", authMiddleware(registry.HandleSetData)).Methods("POST")
+
+	r.HandleFunc("/refresh", registry.RefreshToken).Methods("POST")
 
 	log.Println("Registry starting on :8000")
 	log.Fatal(http.ListenAndServe(":8000", r))

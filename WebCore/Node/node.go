@@ -18,6 +18,7 @@ type Node struct {
 	Data            map[string]interface{}
 	RegistryAddress string
 	Token           string
+	RefreshToken    string
 	mu              sync.RWMutex
 }
 
@@ -48,7 +49,8 @@ func (n *Node) RegisterWithRegistry(registryAddress string) error {
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return err
 	}
-	n.Token = result["token"]
+	n.Token = result["access_token"]
+	n.RefreshToken = result["refresh_token"]
 	return nil
 }
 
@@ -64,7 +66,25 @@ func (n *Node) Authenticate() error {
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return err
 	}
-	n.Token = result["token"]
+	n.Token = result["access_token"]
+	n.RefreshToken = result["refresh_token"]
+	return nil
+}
+
+func (n *Node) RefreshTokens() error {
+	data, _ := json.Marshal(map[string]string{"refresh_token": n.RefreshToken})
+	resp, err := http.Post(fmt.Sprintf("http://%s/refresh", n.RegistryAddress), "application/json", bytes.NewBuffer(data))
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	var result map[string]string
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return err
+	}
+	n.Token = result["access_token"]
+	n.RefreshToken = result["refresh_token"]
 	return nil
 }
 
@@ -73,8 +93,19 @@ func (n *Node) makeAuthenticatedRequest(method, url string, body io.Reader) (*ht
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("Authorization", n.Token)
-	return http.DefaultClient.Do(req)
+	req.Header.Set("Authorization", "Bearer "+n.Token)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode == http.StatusUnauthorized {
+		if err := n.RefreshTokens(); err != nil {
+			return nil, err
+		}
+		req.Header.Set("Authorization", "Bearer "+n.Token)
+		return http.DefaultClient.Do(req)
+	}
+	return resp, nil
 }
 
 func (n *Node) HandleGetData(w http.ResponseWriter, r *http.Request) {

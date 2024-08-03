@@ -1,0 +1,1 @@
+1-nodes with same id but different addresses can register
