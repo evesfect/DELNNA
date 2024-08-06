@@ -1,1 +1,2 @@
 1-nodes with same id but different addresses can register
+2-cannot import logging package into registry.go
