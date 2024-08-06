@@ -1,0 +1,2 @@
+1- containerize node and registry
+2- adjust log directory

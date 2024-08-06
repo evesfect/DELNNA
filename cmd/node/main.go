@@ -7,7 +7,6 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"log"
 	"net/http"
 	"sync"
 )
@@ -269,7 +268,7 @@ func (n *Node) HandleSetRegistryData(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	logging.Info("Data set on registry successfully", "node_id", n.ID)
+	logging.Info("Data set on registry handled successfully", "node_id", n.ID)
 	w.WriteHeader(http.StatusOK)
 }
 
@@ -294,17 +293,18 @@ func main() {
 	)
 	flag.Parse()
 
+	logging.InitLogger(fmt.Sprintf("node_%s.log", *id), true)
+
 	if *id == "" || *address == "" || *registryAddress == "" || *password == "" {
 		logging.Fatal("Missing required parameters", "id", *id, "address", *address, "registry", *registryAddress)
 	}
 
-	logging.InitLogger(fmt.Sprintf("node_%s.log", *id), true)
 	logging.Info("Node starting up", "node_id", *id, "address", *address)
 
 	node := NewNode(*id, *address, *registryAddress, *password)
 
 	if err := node.RegisterWithRegistry(*registryAddress); err != nil {
-		log.Fatalf("Failed to register with registry: %v", err)
+		logging.Fatal("Failed to register with registry", "error", err)
 	}
 
 	http.HandleFunc("/getData", node.HandleGetData)
@@ -314,5 +314,7 @@ func main() {
 	http.HandleFunc("/getRegistryData", node.HandleGetRegistryData)
 
 	logging.Info("Node started", "node_id", node.ID, "address", node.Address)
-	logging.Fatal("Server failed to start", "error", http.ListenAndServe(node.Address, nil))
+	if err := http.ListenAndServe(node.Address, nil); err != nil {
+		logging.Fatal("Node failed to start", "error", err)
+	}
 }
